@@ -18,11 +18,11 @@ class DistanceService(
         .apiKey(apikey)
         .build()
 
-    fun calculateDistance(originAddr: String, destinationAddr: String): Long {
+    fun calculateDistance(originAddr: String, destinationAddr: String): Long? {
         // DISABLED UNTIL I CAN ENABLE BILLING AT GOOGLE
-        if (true) return -1L
+        //if (true) return -1L
 
-        if (originAddr.isBlank() || destinationAddr.isBlank()) return -1L
+        if (originAddr.isBlank() || destinationAddr.isBlank()) return null
 
         val request = DistanceMatrixApi.getDistanceMatrix(context, arrayOf(originAddr), arrayOf(destinationAddr))
         request.trafficModel(TrafficModel.OPTIMISTIC)

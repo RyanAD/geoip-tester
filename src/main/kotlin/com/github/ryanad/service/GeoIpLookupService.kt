@@ -8,8 +8,11 @@ import com.github.ryanad.provider.GeoProvider
 import com.github.ryanad.repository.LookupRepository
 import kotlinx.coroutines.*
 import mu.KotlinLogging
+import okhttp3.internal.toImmutableList
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
+import java.time.Instant
+import java.time.LocalDateTime
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -56,7 +59,20 @@ class GeoIpLookupService(
         coroutineScope.launch {
             logger.info { "Backtesting any new providers" }
             pastLookups.forEach { lookupByIp(it.ipAddress, it.expectedAddress) }
-            logger.info { "Done backtesting" }
+            logger.info { "Done backtesting, back filling distance measurement" }
+            pastLookups
+                .filterNot { it.hadError }
+                .forEach { lookup ->
+                    if (lookup.distanceInMeters == -1L) {
+                        logger.info { "Back filling distance for $lookup" }
+                        val key = cacheKey(lookup.provider, lookup.ipAddress, lookup.expectedAddress)
+                        val distance = distanceService.calculateDistance(lookup.postalCode.orEmpty(), lookup.expectedAddress)
+                        val updatedResult = lookup.copy(distanceInMeters = distance ?: -2L)
+                        cache.put(key, updatedResult)
+                        lookupRepository.save(updatedResult)
+                    }
+                }
+            logger.info { "Done back filling distance measurement" }
         }
     }
 
@@ -81,15 +97,14 @@ class GeoIpLookupService(
         return results
     }
 
-    suspend fun stats(): List<ProviderStats> {
-
+    suspend fun latencyStats(): Map<String, ProviderLatency> {
         val executionTimings = dumpAll()
             .filterNot { it.hadError }
             .groupBy { it.provider }
             .mapValues { it.value.map { it.durationMs } }
 
 
-        val latencies = executionTimings
+        return executionTimings
             .map { entry ->
                 val percentiles = Quantiles.scale(1000).indexes(500, 900, 950, 990, 999).compute(entry.value)
                 ProviderLatency(
@@ -101,6 +116,11 @@ class GeoIpLookupService(
                 )
             }
             .associateBy { it.provider }
+    }
+
+    suspend fun statsByMatchingPostalCode(): List<ProviderStats> {
+
+        val latencies = latencyStats()
 
         // remove errors for now
         val pastLookups = dumpAll().filterNot { it.hadError }
@@ -119,8 +139,38 @@ class GeoIpLookupService(
                 ProviderStats(entries.key, total, matched.toDouble() / max(total, 1), latencies[entries.key]!!)
             }
 
-        return stats.sortedBy { it.percentAccurate }.reversed()
+        return stats.sortedByDescending { it.percentAccurate }
     }
+
+    suspend fun statsByNearestDistance(): List<ProviderStats> {
+
+        val latencies = latencyStats()
+
+        // remove errors for now
+        val pastLookups = dumpAll().filterNot { it.hadError || it.distanceInMeters < 0 }
+        val pastLookupsByProvider = pastLookups.groupBy { it.provider }
+        val lookupsWon = mutableMapOf<String, Int>()
+        pastLookups
+            .groupBy { it.ipAddress to it.expectedAddress }
+            .forEach { entries ->
+                //only for debug
+                val winner = entries.value.minByOrNull { it.distanceInMeters }!!
+                lookupsWon[winner.provider] = lookupsWon.getOrPut(winner.provider, { 0 }).inc()
+            }
+
+        return lookupsWon
+            .map { entry ->
+                val totalLookups = pastLookupsByProvider[entry.key]!!.size
+                ProviderStats(
+                    entry.key,
+                    totalLookups,
+                    entry.value.toDouble() / totalLookups,
+                    latencies[entry.key]!!
+                )
+            }
+            .sortedByDescending { it.percentAccurate }
+    }
+
 
     private suspend fun internalLookupByIp(
         ipAddress: String,
@@ -148,11 +198,11 @@ class GeoIpLookupService(
                     ipAddress,
                     postalCode,
                     expectedAddress,
-                    distanceService.calculateDistance(postalCode.orEmpty(), expectedAddress),
+                    distanceService.calculateDistance(postalCode.orEmpty(), expectedAddress) ?: -2L,
                     elapsedMs
                 )
             },
-            { LookupResult(true, geoProvider.name(), ipAddress, null, expectedAddress, -1L, elapsedMs) }
+            { LookupResult(true, geoProvider.name(), ipAddress, null, expectedAddress, -2L, elapsedMs) }
         )
         cache.put(cacheKey, lookupResult)
         // no need to wait for the save to finish
@@ -173,6 +223,7 @@ data class LookupResult(
     val expectedAddress: String,
     val distanceInMeters: Long,
     val durationMs: Long,
+    val timestamp: Long = Instant.now().epochSecond,
     val cachedResponse: Boolean = false
 )
 

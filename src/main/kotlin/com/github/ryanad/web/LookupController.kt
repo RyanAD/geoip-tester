@@ -23,7 +23,12 @@ class LookupController(@Autowired private val lookupService: GeoIpLookupService)
 
     @GetMapping("/stats")
     suspend fun stats(): List<ProviderStats> {
-        return lookupService.stats()
+        return lookupService.statsByMatchingPostalCode()
+    }
+
+    @GetMapping("/statsByDistance")
+    suspend fun statsByDistance(): List<ProviderStats> {
+        return lookupService.statsByNearestDistance()
     }
 
     @GetMapping("/dump")
